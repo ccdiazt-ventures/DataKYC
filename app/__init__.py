@@ -1,0 +1,1 @@
+"""DataKYC application package."""
