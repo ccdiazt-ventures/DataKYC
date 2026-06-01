@@ -114,6 +114,43 @@
 </header>
 
 <main class="max-w-7xl mx-auto px-4 py-8">
+  <!-- SUPER_ADMIN Panel -->
+  <div id="admin-panel" class="hidden mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-bold text-gray-900">Platform Administration</h2>
+      <button onclick="loadAdminPanel()" class="text-xs px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-lg transition flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+        Refresh
+      </button>
+    </div>
+
+    <!-- Org counts -->
+    <div class="grid grid-cols-3 gap-3 mb-4">
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 text-center">
+        <p id="count-all" class="text-2xl font-bold text-gray-900">—</p>
+        <p class="text-xs text-gray-500 mt-1">Total Orgs</p>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border border-yellow-200 p-4 text-center">
+        <p id="count-pending" class="text-2xl font-bold text-yellow-600">—</p>
+        <p class="text-xs text-gray-500 mt-1">Pending</p>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border border-green-200 p-4 text-center">
+        <p id="count-approved" class="text-2xl font-bold text-green-600">—</p>
+        <p class="text-xs text-gray-500 mt-1">Approved</p>
+      </div>
+    </div>
+
+    <!-- Pending list -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+      <div class="p-4 border-b border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700">Pending Approvals</h3>
+      </div>
+      <div id="pending-list" class="divide-y divide-gray-100">
+        <div class="p-8 text-center text-sm text-gray-400">Loading...</div>
+      </div>
+    </div>
+  </div>
+
   <!-- API Key Bar -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6 flex items-center justify-between">
     <div>
@@ -321,6 +358,90 @@ async function showDashboard() {
   document.getElementById('plan-badge').textContent = currentOrg.plan;
   checkHealth();
   setInterval(checkHealth, 30000);
+
+  // Show admin panel for SUPER_ADMIN
+  if (currentOrg.role === 'SUPER_ADMIN') {
+    document.getElementById('admin-panel').classList.remove('hidden');
+    loadAdminPanel();
+  }
+}
+
+// ─── Admin Panel ───
+async function loadAdminPanel() {
+  if (currentOrg.role !== 'SUPER_ADMIN') return;
+  try {
+    const [allResp, pendingResp] = await Promise.all([
+      fetch('/api/v1/admin/organizations', { headers: { 'Authorization': 'Bearer ' + authToken } }),
+      fetch('/api/v1/admin/organizations/pending', { headers: { 'Authorization': 'Bearer ' + authToken } })
+    ]);
+    const allOrgs = await allResp.json();
+    const pending = await pendingResp.json();
+
+    // Update counts
+    document.getElementById('count-all').textContent = allOrgs.length;
+    document.getElementById('count-pending').textContent = pending.length;
+    document.getElementById('count-approved').textContent = allOrgs.filter(o => o.status === 'APPROVED').length;
+
+    // Render pending list
+    const list = document.getElementById('pending-list');
+    if (!pending.length) {
+      list.innerHTML = '<div class="p-6 text-center text-sm text-gray-400">No pending approvals ✓</div>';
+      return;
+    }
+
+    list.innerHTML = pending.map(org => `
+      <div class="p-4 flex items-center justify-between hover:bg-gray-50 transition" id="org-row-${org.id}">
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-medium text-gray-900 truncate">${escHtml(org.name)}</p>
+          <p class="text-xs text-gray-500">${escHtml(org.email)} · ${org.plan} · ${new Date(org.created_at).toLocaleDateString()}</p>
+        </div>
+        <div class="flex items-center gap-2 ml-4 shrink-0">
+          <button onclick="approveOrg('${org.id}')" class="text-xs px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-medium">Approve</button>
+          <button onclick="rejectOrg('${org.id}')" class="text-xs px-3 py-1.5 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition font-medium">Reject</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    document.getElementById('pending-list').innerHTML =
+      '<div class="p-6 text-center text-sm text-red-500">Error loading: ' + escHtml(err.message) + '</div>';
+  }
+}
+
+async function approveOrg(orgId) {
+  try {
+    const resp = await fetch('/api/v1/admin/organizations/' + orgId + '/approve', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ status: 'APPROVED' })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || 'Failed');
+    showToast('Organization approved ✓', 'success');
+    loadAdminPanel();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function rejectOrg(orgId) {
+  if (!confirm('Reject this organization? They will not be able to log in.')) return;
+  try {
+    const resp = await fetch('/api/v1/admin/organizations/' + orgId + '/approve', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ status: 'REJECTED' })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || 'Failed');
+    showToast('Organization rejected', 'info');
+    loadAdminPanel();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }
 
 async function loadApiKey() {
