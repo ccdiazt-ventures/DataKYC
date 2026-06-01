@@ -1,4 +1,4 @@
-"""Organization model with tier/plan support."""
+"""Organization model with tier/plan and role support."""
 
 import uuid
 from datetime import datetime
@@ -20,6 +20,14 @@ class Organization(Base):
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     plan: Mapped[str] = mapped_column(String(20), nullable=False, default="FREE")
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    role: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="USER",
+        server_default="USER",
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="PENDING",
+        server_default="PENDING",
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

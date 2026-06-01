@@ -10,6 +10,18 @@ class PlanTier(StrEnum):
     ENTERPRISE = "ENTERPRISE"
 
 
+class OrganizationRole(StrEnum):
+    SUPER_ADMIN = "SUPER_ADMIN"
+    ADMIN = "ADMIN"
+    USER = "USER"
+
+
+class OrganizationStatus(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class DocumentType(StrEnum):
     INE_FRONT = "INE_FRONT"
     INE_BACK = "INE_BACK"

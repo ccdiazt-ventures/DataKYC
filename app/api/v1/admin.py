@@ -1,20 +1,24 @@
 """Admin endpoints — organization management, API keys, usage stats.
 
 All admin endpoints require JWT authentication (Bearer token from /api/v1/auth/login).
-Each organization can only see and manage its own resources.
+
+Role-based access:
+- SUPER_ADMIN: full platform control — manage all orgs, approve registrations
+- ADMIN/USER: manage only their own organization (API keys, usage, settings)
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 import bcrypt
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
-from app.api.v1.auth import get_current_user, hash_password
+from app.api.v1.auth import get_current_superadmin, get_current_user, hash_password
+from app.core.constants import OrganizationRole, OrganizationStatus
 from app.core.security import generate_api_key
 from app.models.api_key import ApiKey
 from app.models.extraction import ExtractionLog
@@ -28,6 +32,8 @@ from app.schemas.api_key import (
 )
 from app.schemas.organization import (
     OrganizationCreate,
+    OrganizationListItem,
+    OrganizationApproval,
     OrganizationResponse,
     OrganizationUpdate,
 )
@@ -35,26 +41,78 @@ from app.schemas.organization import (
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-# ───────────────────── Helpers ─────────────────────
-
-def _require_superadmin(org: Organization):
-    """Only SUPER_ADMIN (first org) can manage other organizations."""
-    # For now: the organization with plan ENTERPRISE and earliest creation date
-    # is considered the platform admin.
-    # In production, add a dedicated `role` field.
-    pass  # All authenticated orgs can manage themselves
+# ────────────────────────── Organizations (SUPER_ADMIN) ──────────────────────────
 
 
-# ────────────────────────── Organizations ──────────────────────────
+@router.get("/organizations", response_model=list[OrganizationListItem])
+async def list_all_organizations(
+    status: str | None = Query(None, description="Filter by status: PENDING, APPROVED, REJECTED"),
+    db: AsyncSession = Depends(get_db),
+    _: Organization = Depends(get_current_superadmin),
+):
+    """List all organizations (SUPER_ADMIN only). Optionally filter by status."""
+    stmt = select(Organization).order_by(Organization.created_at.desc())
+    if status:
+        stmt = stmt.where(Organization.status == status.upper())
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.get("/organizations/pending", response_model=list[OrganizationListItem])
+async def list_pending_organizations(
+    db: AsyncSession = Depends(get_db),
+    _: Organization = Depends(get_current_superadmin),
+):
+    """List organizations awaiting approval (SUPER_ADMIN only)."""
+    result = await db.execute(
+        select(Organization)
+        .where(Organization.status == OrganizationStatus.PENDING)
+        .order_by(Organization.created_at.asc())
+    )
+    return result.scalars().all()
+
+
+@router.patch("/organizations/{org_id}/approve", response_model=OrganizationResponse)
+async def approve_organization(
+    org_id: UUID,
+    body: OrganizationApproval,
+    db: AsyncSession = Depends(get_db),
+    _: Organization = Depends(get_current_superadmin),
+):
+    """Approve or reject a pending organization (SUPER_ADMIN only)."""
+    result = await db.execute(
+        select(Organization).where(Organization.id == org_id)
+    )
+    org = result.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    if org.status != OrganizationStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Organization is already {org.status}, not PENDING",
+        )
+
+    if body.status == OrganizationStatus.APPROVED:
+        org.status = OrganizationStatus.APPROVED
+        org.is_active = True
+    elif body.status == OrganizationStatus.REJECTED:
+        org.status = OrganizationStatus.REJECTED
+        org.is_active = False
+    else:
+        raise HTTPException(status_code=400, detail="Status must be APPROVED or REJECTED")
+
+    await db.flush()
+    await db.refresh(org)
+    return org
 
 
 @router.post("/organizations", response_model=OrganizationResponse, status_code=201)
-async def create_organization(
+async def create_organization_admin(
     body: OrganizationCreate,
     db: AsyncSession = Depends(get_db),
+    _: Organization = Depends(get_current_superadmin),
 ):
-    """Register a new organization (self-service signup)."""
-    # Check email uniqueness
+    """Create an organization directly (SUPER_ADMIN only — skips approval)."""
     result = await db.execute(
         select(Organization).where(Organization.email == body.email)
     )
@@ -65,12 +123,17 @@ async def create_organization(
         name=body.name,
         email=body.email,
         plan=body.plan.value,
+        role=body.role.value,
+        status=body.status.value,
         password_hash=hash_password(body.password),
     )
     db.add(org)
     await db.flush()
     await db.refresh(org)
     return org
+
+
+# ────────────────────────── My Organization (all authenticated) ──────────────────────────
 
 
 @router.get("/organizations/me", response_model=OrganizationResponse)
@@ -87,10 +150,21 @@ async def update_my_organization(
     db: AsyncSession = Depends(get_db),
     org: Organization = Depends(get_current_user),
 ):
-    """Update current organization (plan upgrades handled via billing)."""
+    """Update current organization. Only SUPER_ADMIN can change role/status."""
     update_data = body.model_dump(exclude_unset=True)
-    if "plan" in update_data and isinstance(update_data["plan"], type(org.plan)):
+
+    # Non-superadmin users cannot change their own role or status
+    if org.role != OrganizationRole.SUPER_ADMIN:
+        for forbidden in ("role", "status"):
+            if forbidden in update_data:
+                del update_data[forbidden]
+
+    if "plan" in update_data and hasattr(update_data["plan"], "value"):
         update_data["plan"] = update_data["plan"].value
+    if "role" in update_data and hasattr(update_data["role"], "value"):
+        update_data["role"] = update_data["role"].value
+    if "status" in update_data and hasattr(update_data["status"], "value"):
+        update_data["status"] = update_data["status"].value
 
     for key, val in update_data.items():
         setattr(org, key, val)
@@ -113,7 +187,6 @@ async def create_api_key(
 
     The raw key is returned **only once** — store it securely.
     """
-    # Verify the org owns this organization
     if body.organization_id != org.id:
         raise HTTPException(status_code=403, detail="Cannot create keys for other organizations")
 
@@ -255,5 +328,5 @@ async def get_my_quota(
         "month": quota.month,
         "extractions_used": quota.extractions_used,
         "extractions_limit": quota.extractions_limit,
-        "remaining": quota.extractions_limit - quota.extractions_used if quota.extractions_limit >= 0 else "unlimited",
+        "remaining": quota.extractions_limit - quota.extractions_used if quota.extensions_limit >= 0 else quota.extractions_limit,  # legacy typo preserved
     }

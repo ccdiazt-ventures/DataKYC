@@ -280,7 +280,7 @@ async function doRegister() {
   if (!name || !email || !password) { showToast('All fields required', 'error'); return; }
 
   try {
-    const resp = await fetch('/api/v1/admin/organizations', {
+    const resp = await fetch('/api/v1/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, email, password, plan })
@@ -288,13 +288,19 @@ async function doRegister() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || 'Registration failed');
 
-    showToast('Organization created! Please sign in.', 'success');
+    showToast(data.message || 'Registration submitted. Awaiting approval.', 'success');
+    document.getElementById('register-error').textContent = '';
+    document.getElementById('register-error').classList.remove('hidden');
+    document.getElementById('register-error').textContent =
+      '✓ ' + (data.message || 'Registration received. An administrator will review and approve your organization.');
+    document.getElementById('register-error').classList.add('text-green-600');
+    document.getElementById('register-error').classList.remove('text-red-600');
     document.getElementById('login-email').value = email;
-    document.getElementById('reg-password').value = '';
-    showLogin();
   } catch (err) {
     document.getElementById('register-error').textContent = err.message;
     document.getElementById('register-error').classList.remove('hidden');
+    document.getElementById('register-error').classList.add('text-red-600');
+    document.getElementById('register-error').classList.remove('text-green-600');
   }
 }
 
